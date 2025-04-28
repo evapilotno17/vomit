@@ -1,42 +1,179 @@
 #!/usr/bin/env python3
+"""
+vomit – repo‑slurper for LLM context
+
+recent additions
+────────────────
+--tokens : reports token counts **and** embeds the same table at the very top of
+           *vomit.txt* so the LLM sees the budget first.
+"""
+
+from __future__ import annotations
 
 import os
 import argparse
 from pathlib import Path
+from typing import List, Dict, Tuple
 
-def load_ignore_patterns(file):
-    if not file: return []
-    return [line.strip() for line in open(file) if line.strip() and not line.startswith('#')]
+# ──────────────────────────────────────────────────────────────────────────────
+# Token counting helpers
+# ──────────────────────────────────────────────────────────────────────────────
+try:
+    import tiktoken  # type: ignore
 
-def should_ignore(path, patterns):
-    return any((pat in path) for pat in patterns)
+    _ENC = tiktoken.get_encoding("cl100k_base")
 
-def vomit(root, ignore_file=None):
-    ignore_patterns = load_ignore_patterns(ignore_file)
-    output_path = Path(root) / "vomit.txt"
+    def _token_len(text: str) -> int:
+        return len(_ENC.encode(text))
+except Exception:  # keep script self‑contained when tiktoken missing
 
-    with open(output_path, 'w', encoding='utf-8') as out:
-        for dirpath, _, filenames in os.walk(root):
-            for fname in filenames:
-                full_path = Path(dirpath) / fname
-                rel_path = full_path.relative_to(root)
+    def _token_len(text: str) -> int:  # fallback ≈ one token per word
+        return max(1, len(text.split()))
 
-                if rel_path == output_path.relative_to(root):
-                    continue
-                if should_ignore(str(rel_path), ignore_patterns):
-                    continue
 
-                out.write(f"[[[{rel_path}]]]\n")
-                try:
-                    with open(full_path, 'r', encoding='utf-8') as f:
-                        out.write(f.read())
-                except:
-                    out.write("// [error reading file]\n")
-                out.write("\n")
+# ──────────────────────────────────────────────────────────────────────────────
+# Pattern utils
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _load_patterns(file: str | None) -> List[str]:
+    if not file:
+        return []
+    with open(file, "r", encoding="utf-8") as fh:
+        return [ln.strip() for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def _matches_any(path: str, patterns: List[str]) -> bool:
+    return any(pat in path for pat in patterns)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tree printer
+# ──────────────────────────────────────────────────────────────────────────────
+
+def print_tree(root: Path, at: Path, prefix: str = "", ignore=None, contains=None):
+    ignore = ignore or []
+    contains = [""] if contains is None or not contains else contains
+
+    children = sorted(at.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
+    for idx, p in enumerate(children):
+        rel = str(p.relative_to(root))
+        if _matches_any(rel, ignore):
+            continue
+        if p.is_file() and not _matches_any(rel, contains):
+            continue
+        connector = "!-" if idx == len(children) - 1 else "|-"
+        print(prefix + connector + p.name)
+        if p.is_dir():
+            print_tree(root, p, prefix + "|  ", ignore, contains)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Chunk builder
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _build_file_chunk(rel_path: Path, full_path: Path) -> Tuple[str, int]:
+    """Return (chunk_string, token_count)."""
+    header = f"// ===== BEGIN: {rel_path} =====\n"
+    footer = f"// ===== END  : {rel_path} =====\n"
+
+    try:
+        with full_path.open("r", encoding="utf-8") as f:
+            body = f.read()
+    except Exception as exc:
+        body = f"// [error reading file: {exc}]\n"
+
+    if not body.endswith("\n"):
+        body += "\n"
+
+    tokens = _token_len(body)
+    chunk = "\n" + header + body + footer + "\n"
+    return chunk, tokens
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Token‑table formatter
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _format_tok_table(tok_table: Dict[str, int]) -> str:
+    if not tok_table:
+        return ""
+    lines = ["// ===== TOKEN USAGE (≈) =====\n"]
+    total = sum(tok_table.values())
+    for path, n in sorted(tok_table.items(), key=lambda x: -x[1]):
+        lines.append(f"// {n:>7}  {path}\n")
+    lines.append("// ───────────────────────────\n")
+    lines.append(f"// {total:>7}  TOTAL\n\n")
+    return "".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main dump routine
+# ──────────────────────────────────────────────────────────────────────────────
+
+def vomit(
+    root: Path,
+    ignore_file: str | None = None,
+    contains_file: str | None = None,
+    report_tokens: bool = False,
+) -> None:
+    ignore_patterns = _load_patterns(ignore_file)
+    contains_patterns = _load_patterns(contains_file)
+    output_path = root / "vomit.txt"
+
+    chunks: List[str] = []
+    tok_table: Dict[str, int] = {}
+
+    for dirpath, _, filenames in os.walk(root):
+        for fname in filenames:
+            full_path = Path(dirpath) / fname
+            rel_path = full_path.relative_to(root)
+
+            if rel_path == output_path.relative_to(root):
+                continue
+
+            rel_str = str(rel_path).replace(os.sep, "/")
+            if _matches_any(rel_str, ignore_patterns):
+                continue
+            if contains_patterns and not _matches_any(rel_str, contains_patterns):
+                continue
+
+            chunk, toks = _build_file_chunk(rel_path, full_path)
+            chunks.append(chunk)
+            if report_tokens:
+                tok_table[rel_str] = toks
+
+    tok_banner = _format_tok_table(tok_table) if report_tokens else ""
+
+    # atomic rewrite
+    temp_path = output_path.with_suffix(".vomit.tmp")
+    with temp_path.open("w", encoding="utf-8", newline="\n") as out:
+        out.write(tok_banner + "".join(chunks))
+    temp_path.replace(output_path)
+
+    if report_tokens:
+        # mirror to stdout for immediate feedback
+        print(tok_banner.replace("// ", ""), end="")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CLI
+# ──────────────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ignore", help="Path to ignore‑pattern file (like .gitignore)")
+    parser.add_argument("--contains", help="Inverse of --ignore – only dump paths containing one of these patterns.")
+    parser.add_argument("--tree", action="store_true", help="Print directory tree before dump.")
+    parser.add_argument("--tokens", action="store_true", help="Report token counts per file and embed the table at top of vomit.txt.")
+
+    args = parser.parse_args()
+    cwd = Path.cwd()
+
+    if args.tree:
+        print_tree(cwd, cwd, "", _load_patterns(args.ignore), _load_patterns(args.contains))
+
+    vomit(cwd, ignore_file=args.ignore, contains_file=args.contains, report_tokens=args.tokens)
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ignore", help="Path to ignore-pattern file (like .gitignore)")
-    args = parser.parse_args()
-    print(args)
-    vomit(os.getcwd(), args.ignore)
+    main()
