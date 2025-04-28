@@ -4,22 +4,72 @@ if you're like me and prefer using llms the traditional way (copy pasting into y
 
 you can use this to dump your entire filesystem into a single .txt file 
 
+
 ## installation
-if you're on mac: 
+
+on mac:
+
 ```bash
 brew tap evapilotno17/vomit
 brew install vomit
 vomit --help
 ```
-if you're on windows: 
+
+on windows:
+
 ```bash
 kys
 ```
 
 ## usage
 
-the `--ignore` flag is optional. 
+basic dump:
+
+```bash
+vomit
+```
+
+ignore certain paths (like `.git/`, `*.ipynb`, etc):
 
 ```bash
 vomit --ignore .vomitignore
+```
+
+only include certain paths (inverse filter):
+
+```bash
+vomit --contains .vomitinclude
+```
+
+print a live ASCII tree of the directory structure before dumping:
+
+```bash
+vomit --tree
+```
+
+report token usage per file (and embed it into the dump file for LLMs to see):
+
+```bash
+vomit --tokens
+```
+
+full example:
+
+```bash
+vomit --ignore .vomitignore --contains .vomitinclude --tree --tokens
+```
+
+this will:
+- print a live tree to stdout
+- dump only files matching your `.vomitinclude` patterns
+- ignore files matching `.vomitignore`
+- embed a full token usage table at the top of `vomit.txt`
+
+## testing
+
+to test vomit inside the provided `test_directory`, run:
+
+```bash
+cd test_directory
+vomit --ignore ../vomitignore.txt --contains ../vomitinclude.txt --tree --tokens
 ```
